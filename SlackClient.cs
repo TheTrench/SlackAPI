@@ -7,550 +7,606 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace SlackAPI
 {
-    /// <summary>
-    /// SlackClient is intended to solely handle RPC (HTTP-based) functionality. Does not handle WebSocket connectivity.
-    /// 
-    /// For WebSocket connectivity, refer to <see cref="SlackAPI.SlackSocketClient"/>
-    /// </summary>
-    public class SlackClient
-    {
-        readonly string APIToken;
-        bool authWorks = false;
+	/// <summary>
+	/// SlackClient is intended to solely handle RPC (HTTP-based) functionality. Does not handle WebSocket connectivity.
+	/// 
+	/// For WebSocket connectivity, refer to <see cref="SlackAPI.SlackSocketClient"/>
+	/// </summary>
+	public class SlackClient
+	{
+		readonly string APIToken;
+		bool authWorks = false;
 
-        const string APIBaseLocation = "https://slack.com/api/";
-        const int Timeout = 5000;
+		const string APIBaseLocation = "https://slack.com/api/";
+		const int Timeout = 5000;
 
-        const char StartHighlight = '\uE001';
-        const char EndHightlight = '\uE001';
+		const char StartHighlight = '\uE001';
+		const char EndHightlight = '\uE001';
 
-        static List<Tuple<string, string>> replacers = new List<Tuple<string, string>>(){
+		static List<Tuple<string, string>> replacers = new List<Tuple<string, string>>(){
             new Tuple<string,string>("&", "&amp;"),
             new Tuple<string,string>("<", "&lt;"),
             new Tuple<string,string>(">", "&gt;")
         };
 
-        //Dictionary<int, Action<ReceivingMessage>> socketCallbacks;
+		//Dictionary<int, Action<ReceivingMessage>> socketCallbacks;
 
-        public Self MySelf;
-        public User MyData;
-        public Team MyTeam;
+		public Self MySelf;
+		public User MyData;
+		public Team MyTeam;
 
-        public List<string> starredChannels;
+		public List<string> starredChannels;
 
-        public List<User> Users;
-        public List<Channel> Channels;
-        public List<Channel> Groups;
-        public List<DirectMessageConversation> DirectMessages;
+		public List<User> Users;
+		public List<Channel> Channels;
+		public List<Channel> Groups;
+		public List<DirectMessageConversation> DirectMessages;
 
-        public Dictionary<string, User> UserLookup;
-        public Dictionary<string, Channel> ChannelLookup;
-        public Dictionary<string, Channel> GroupLookup;
-        public Dictionary<string, DirectMessageConversation> DirectMessageLookup;
+		public Dictionary<string, User> UserLookup;
+		public Dictionary<string, Channel> ChannelLookup;
+		public Dictionary<string, Channel> GroupLookup;
+		public Dictionary<string, DirectMessageConversation> DirectMessageLookup;
+		public IMessageSource GeneralLookup(string key)
+		{
+			TaskFactory tf = new TaskFactory();
+			var result = internalLookup(key);
+			if (result == null)
+			{
+				Task usersDone = new Task(() => { });
+				Task channelsDone = new Task(() => { });
+				Task groupsDone = new Task(() => { });
+				Task directMessagesDone = new Task(() => { });
 
-        //public event Action<ReceivingMessage> OnUserTyping;
-        //public event Action<ReceivingMessage> OnMessageReceived;
-        //public event Action<ReceivingMessage> OnPresenceChanged;
-        //public event Action<ReceivingMessage> OnHello;
+				Task finished = tf.ContinueWhenAll(new[] { usersDone, channelsDone, groupsDone, directMessagesDone}, ar => {
+					result = internalLookup(key);
+				});
 
-        public SlackClient(string token)
-        {
-            APIToken = token;
-        }
+				GetUserList(ulr =>
+				{
+					UserLookup = ulr.members.ToDictionary(u => u.id, u => u);
+					usersDone.Start();
+				});
+				GetChannelList(clr =>
+				{
+					ChannelLookup = clr.channels.ToDictionary(c => c.id, c => c);
+					channelsDone.Start();
+				});
+				GetGroupsList(glr =>
+				{
+					GroupLookup = glr.groups.ToDictionary(g => g.id, g => g);
+					groupsDone.Start();
+				});
+				GetDirectMessageList(dmlr =>
+				{
+					DirectMessageLookup = dmlr.ims.ToDictionary(dm => dm.id, dm => dm);
+					directMessagesDone.Start();
+				});
+				finished.Wait();
+			}
+			return result;
+
+		}
+
+		private IMessageSource internalLookup(string key)
+		{
+			if (DirectMessageLookup.ContainsKey(key))
+				key = DirectMessageLookup[key].user;
+			if (UserLookup.ContainsKey(key))
+				return UserLookup[key];
+			if (ChannelLookup.ContainsKey(key))
+				return ChannelLookup[key];
+			if (GroupLookup.ContainsKey(key))
+				return GroupLookup[key];
+			return null;
+		}
+
+
+		//public event Action<ReceivingMessage> OnUserTyping;
+		//public event Action<ReceivingMessage> OnMessageReceived;
+		//public event Action<ReceivingMessage> OnPresenceChanged;
+		//public event Action<ReceivingMessage> OnHello;
+
+		public SlackClient(string token)
+		{
+			APIToken = token;
+		}
 
 		public virtual void Connect(Action<LoginResponse> onConnected = null, Action onSocketConnected = null)
-        {
-            EmitLogin((loginDetails) =>
-            {
-				if(loginDetails.ok)
+		{
+			EmitLogin((loginDetails) =>
+			{
+				if (loginDetails.ok)
 					Connected(loginDetails);
-                if (onConnected != null)
-                    onConnected(loginDetails);
-            });
-        }
+				if (onConnected != null)
+					onConnected(loginDetails);
+			});
+		}
 
-        protected virtual void Connected(LoginResponse loginDetails)
-        {
-            MySelf = loginDetails.self;
-            MyData = loginDetails.users.First((c) => c.id == MySelf.id);
-            MyTeam = loginDetails.team;
+		protected virtual void Connected(LoginResponse loginDetails)
+		{
+			MySelf = loginDetails.self;
+			MyData = loginDetails.users.First((c) => c.id == MySelf.id);
+			MyTeam = loginDetails.team;
 
-            Users = new List<User>(loginDetails.users.Where((c) => !c.deleted));
-            Channels = new List<Channel>(loginDetails.channels);
-            Groups = new List<Channel>(loginDetails.groups);
-            DirectMessages = new List<DirectMessageConversation>(loginDetails.ims.Where((c) => Users.Exists((a) => a.id == c.user) && c.id != MySelf.id));
-            starredChannels =
-                    Groups.Where((c) => c.is_starred).Select((c) => c.id)
-                .Union(
-                    DirectMessages.Where((c) => c.is_starred).Select((c) => c.user)
-                ).Union(
-                    Channels.Where((c) => c.is_starred).Select((c) => c.id)
-                ).ToList();
+			Users = new List<User>(loginDetails.users.Where((c) => !c.deleted));
+			Channels = new List<Channel>(loginDetails.channels);
+			Groups = new List<Channel>(loginDetails.groups);
+			DirectMessages = new List<DirectMessageConversation>(loginDetails.ims.Where((c) => Users.Exists((a) => a.id == c.user) && c.id != MySelf.id));
+			starredChannels =
+					Groups.Where((c) => c.is_starred).Select((c) => c.id)
+				.Union(
+					DirectMessages.Where((c) => c.is_starred).Select((c) => c.user)
+				).Union(
+					Channels.Where((c) => c.is_starred).Select((c) => c.id)
+				).ToList();
 
-            UserLookup = new Dictionary<string, User>();
-            foreach (User u in Users) UserLookup.Add(u.id, u);
+			UserLookup = new Dictionary<string, User>();
+			foreach (User u in Users) UserLookup.Add(u.id, u);
 
-            ChannelLookup = new Dictionary<string, Channel>();
-            foreach (Channel c in Channels) ChannelLookup.Add(c.id, c);
+			ChannelLookup = new Dictionary<string, Channel>();
+			foreach (Channel c in Channels) ChannelLookup.Add(c.id, c);
 
-            GroupLookup = new Dictionary<string, Channel>();
-            foreach (Channel g in Groups) GroupLookup.Add(g.id, g);
+			GroupLookup = new Dictionary<string, Channel>();
+			foreach (Channel g in Groups) GroupLookup.Add(g.id, g);
 
-            DirectMessageLookup = new Dictionary<string, DirectMessageConversation>();
-            foreach (DirectMessageConversation im in DirectMessages) DirectMessageLookup.Add(im.id, im);
-        }
+			DirectMessageLookup = new Dictionary<string, DirectMessageConversation>();
+			foreach (DirectMessageConversation im in DirectMessages) DirectMessageLookup.Add(im.id, im);
+		}
 
-        public static void APIRequest<K>(Action<K> callback, Tuple<string, string>[] getParameters, Tuple<string, string>[] postParameters)
-            where K : Response
-        {
-            RequestPath path = RequestPath.GetRequestPath<K>();
-            //TODO: Custom paths? Appropriate subdomain paths? Not sure.
-            //Maybe store custom path in the requestpath.path itself?
+		public static void APIRequest<K>(Action<K> callback, Tuple<string, string>[] getParameters, Tuple<string, string>[] postParameters)
+			where K : Response
+		{
+			RequestPath path = RequestPath.GetRequestPath<K>();
+			//TODO: Custom paths? Appropriate subdomain paths? Not sure.
+			//Maybe store custom path in the requestpath.path itself?
 
-            string parameters = getParameters
+			string parameters = getParameters
 				.Select(new Func<Tuple<string, string>, string>(a => string.Format("{0}={1}", Uri.EscapeDataString(a.Item1), Uri.EscapeDataString(a.Item2))))
-                .Aggregate((a, b) =>
-            {
-                if (string.IsNullOrEmpty(a))
-                    return b;
-                else
-                    return string.Format("{0}&{1}", a, b);
-            });
+				.Aggregate((a, b) =>
+			{
+				if (string.IsNullOrEmpty(a))
+					return b;
+				else
+					return string.Format("{0}&{1}", a, b);
+			});
 
-            Uri requestUri = new Uri(string.Format("{0}?{1}", Path.Combine(APIBaseLocation, path.Path), parameters));
+			Uri requestUri = new Uri(string.Format("{0}?{1}", Path.Combine(APIBaseLocation, path.Path), parameters));
 
-            HttpWebRequest request = (HttpWebRequest)HttpWebRequest.Create(requestUri);
+			HttpWebRequest request = (HttpWebRequest)HttpWebRequest.Create(requestUri);
 
-            //This will handle all of the processing.
-            RequestState<K> state = new RequestState<K>(request, postParameters, callback);
-            state.Begin();
-        }
+			//This will handle all of the processing.
+			RequestState<K> state = new RequestState<K>(request, postParameters, callback);
+			state.Begin();
+		}
 
-        public static void APIGetRequest<K>(Action<K> callback, params Tuple<string, string>[] getParameters)
-            where K : Response
-        {
-            APIRequest<K>(callback, getParameters, new Tuple<string, string>[0]);
-        }
+		public static void APIGetRequest<K>(Action<K> callback, params Tuple<string, string>[] getParameters)
+			where K : Response
+		{
+			APIRequest<K>(callback, getParameters, new Tuple<string, string>[0]);
+		}
 
-        public void APIRequestWithToken<K>(Action<K> callback, params Tuple<string,string>[] getParameters)
-            where K : Response
-        {
-            Tuple<string, string>[] tokenArray = new Tuple<string, string>[]{
+		public void APIRequestWithToken<K>(Action<K> callback, params Tuple<string, string>[] getParameters)
+			where K : Response
+		{
+			Tuple<string, string>[] tokenArray = new Tuple<string, string>[]{
                 new Tuple<string,string>("token", APIToken)
             };
 
-            if (getParameters != null && getParameters.Length > 0)
-                tokenArray = tokenArray.Concat(getParameters).ToArray();
+			if (getParameters != null && getParameters.Length > 0)
+				tokenArray = tokenArray.Concat(getParameters).ToArray();
 
-            APIRequest(callback, tokenArray, new Tuple<string, string>[0]);
-        }
+			APIRequest(callback, tokenArray, new Tuple<string, string>[0]);
+		}
 
-        public static void StartAuth(Action<AuthStartResponse> callback, string email)
-        {
-            APIRequest(callback, new Tuple<string, string>[] { new Tuple<string, string>("email", email) }, new Tuple<string, string>[0]);
-        }
+		public static void StartAuth(Action<AuthStartResponse> callback, string email)
+		{
+			APIRequest(callback, new Tuple<string, string>[] { new Tuple<string, string>("email", email) }, new Tuple<string, string>[0]);
+		}
 
-        public static void AuthSignin(Action<AuthSigninResponse> callback, string userId, string teamId, string password)
-        {
-            APIRequest(callback, new Tuple<string, string>[] { 
+		public static void AuthSignin(Action<AuthSigninResponse> callback, string userId, string teamId, string password)
+		{
+			APIRequest(callback, new Tuple<string, string>[] { 
                 new Tuple<string,string>("user", userId),
                 new Tuple<string,string>("team", teamId),
                 new Tuple<string,string>("password", password)
             }, new Tuple<string, string>[0]);
-        }
-
-        public void TestAuth(Action<AuthTestResponse> callback)
-        {
-            APIRequestWithToken(callback);
-        }
-
-        public void GetUserList(Action<UserListResponse> callback)
-        {
-            APIRequestWithToken(callback);
-        }
-
-        public void GetChannelList(Action<ChannelListResponse> callback, bool ExcludeArchived = true)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("exclude_archived", ExcludeArchived ? "1" : "0"));
-        }
-
-        public void GetGroupsList(Action<GroupListResponse> callback, bool ExcludeArchived = true)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("exclude_archived", ExcludeArchived ? "1" : "0"));
-        }
-
-        public void GetDirectMessageList(Action<DirectMessageConversationListResponse> callback)
-        {
-            APIRequestWithToken(callback);
-        }
-
-        public void GetFiles(Action<FileListResponse> callback, string userId = null, DateTime? from = null, DateTime? to = null, int? count = null, int? page = null, FileTypes types = FileTypes.all)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
-
-            if (!string.IsNullOrEmpty(userId))
-                parameters.Add(new Tuple<string,string>("user", userId));
-
-            if (from.HasValue)
-                parameters.Add(new Tuple<string, string>("ts_from", from.Value.ToProperTimeStamp()));
-
-            if (to.HasValue)
-                parameters.Add(new Tuple<string, string>("ts_to", to.Value.ToProperTimeStamp()));
-
-            if (!types.HasFlag(FileTypes.all))
-            {
-                FileTypes[] values = (FileTypes[])Enum.GetValues(typeof(FileTypes));
-                
-                StringBuilder building = new StringBuilder();
-                bool first = true;
-                for (int i = 0; i < values.Length; ++i)
-                {
-                    if (types.HasFlag(values[i]))
-                    {
-                        if (!first) building.Append(",");
-
-                        building.Append(values[i].ToString());
-
-                        first = false;
-                    }
-                }
-
-                if (building.Length > 0)
-                    parameters.Add(new Tuple<string, string>("types", building.ToString()));
-            }
-
-            if (count.HasValue)
-                parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
-
-            if (page.HasValue)
-                parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
-
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
-
-        void GetHistory<K>(Action<K> historyCallback, string channel, DateTime? latest = null, DateTime? oldest = null, int? count = null)
-            where K : MessageHistory
-        {
-            List<Tuple<string,string>> parameters = new List<Tuple<string,string>>();
-            parameters.Add(new Tuple<string, string>("channel", channel));
-            
-            if(latest.HasValue)
-                parameters.Add(new Tuple<string, string>("latest", latest.Value.ToProperTimeStamp()));
-            if(oldest.HasValue)
-                parameters.Add(new Tuple<string, string>("oldest", oldest.Value.ToProperTimeStamp()));
-            if(count.HasValue)
-                parameters.Add(new Tuple<string,string>("count", count.Value.ToString()));
-
-            APIRequestWithToken(historyCallback, parameters.ToArray());
-        }
-
-        public void GetChannelHistory(Action<ChannelMessageHistory> callback, Channel channelInfo, DateTime? latest = null, DateTime? oldest = null, int? count = null)
-        {
-            GetHistory(callback, channelInfo.id, latest, oldest, count);
-        }
-
-        public void GetDirectMessageHistory(Action<MessageHistory> callback, DirectMessageConversation conversationInfo, DateTime? latest = null, DateTime? oldest = null, int? count = null)
-        {
-            GetHistory(callback, conversationInfo.id, latest, oldest, count);
-        }
-
-        public void GetGroupHistory(Action<GroupMessageHistory> callback, Channel groupInfo, DateTime? latest = null, DateTime? oldest = null, int? count = null)
-        {
-            GetHistory(callback, groupInfo.id, latest, oldest, count);
-        }
-
-        public void MarkChannel(Action<MarkResponse> callback, string channelId, DateTime ts)
-        {
-            APIRequestWithToken(callback,
-                new Tuple<string, string>("channel", channelId),
-                new Tuple<string, string>("ts", ts.ToProperTimeStamp())
-            );
-        }
-
-        public void GetFileInfo(Action<FileInfoResponse> callback, string fileId, int? page = null, int? count = null)
-        {
-            List<Tuple<string,string>> parameters = new List<Tuple<string,string>>();
-
-            parameters.Add(new Tuple<string,string>("file", fileId));
-            
-            if(count.HasValue)
-                parameters.Add(new Tuple<string,string>("count", count.Value.ToString()));
-
-            if (page.HasValue)
-                parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
-
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
-        #region Groups
-        public void GroupsArchive(Action<GroupArchiveResponse> callback, string channelId)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
-        }
-
-        public void GroupsClose(Action<GroupCloseResponse> callback, string channelId)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
-        }
+		}
+
+		public void TestAuth(Action<AuthTestResponse> callback)
+		{
+			APIRequestWithToken(callback);
+		}
+
+		public void GetUserList(Action<UserListResponse> callback)
+		{
+			APIRequestWithToken(callback);
+		}
+
+		public void GetChannelList(Action<ChannelListResponse> callback, bool ExcludeArchived = true)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("exclude_archived", ExcludeArchived ? "1" : "0"));
+		}
+
+		public void GetGroupsList(Action<GroupListResponse> callback, bool ExcludeArchived = true)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("exclude_archived", ExcludeArchived ? "1" : "0"));
+		}
+
+		public void GetDirectMessageList(Action<DirectMessageConversationListResponse> callback)
+		{
+			APIRequestWithToken(callback);
+		}
+
+		public void GetFiles(Action<FileListResponse> callback, string userId = null, DateTime? from = null, DateTime? to = null, int? count = null, int? page = null, FileTypes types = FileTypes.all)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+
+			if (!string.IsNullOrEmpty(userId))
+				parameters.Add(new Tuple<string, string>("user", userId));
+
+			if (from.HasValue)
+				parameters.Add(new Tuple<string, string>("ts_from", from.Value.ToProperTimeStamp()));
+
+			if (to.HasValue)
+				parameters.Add(new Tuple<string, string>("ts_to", to.Value.ToProperTimeStamp()));
+
+			if (!types.HasFlag(FileTypes.all))
+			{
+				FileTypes[] values = (FileTypes[])Enum.GetValues(typeof(FileTypes));
+
+				StringBuilder building = new StringBuilder();
+				bool first = true;
+				for (int i = 0; i < values.Length; ++i)
+				{
+					if (types.HasFlag(values[i]))
+					{
+						if (!first) building.Append(",");
+
+						building.Append(values[i].ToString());
+
+						first = false;
+					}
+				}
+
+				if (building.Length > 0)
+					parameters.Add(new Tuple<string, string>("types", building.ToString()));
+			}
+
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
+
+			if (page.HasValue)
+				parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
+
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
+
+		void GetHistory<K>(Action<K> historyCallback, string channel, DateTime? latest = null, DateTime? oldest = null, int? count = null)
+			where K : MessageHistory
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+			parameters.Add(new Tuple<string, string>("channel", channel));
+
+			if (latest.HasValue)
+				parameters.Add(new Tuple<string, string>("latest", latest.Value.ToProperTimeStamp()));
+			if (oldest.HasValue)
+				parameters.Add(new Tuple<string, string>("oldest", oldest.Value.ToProperTimeStamp()));
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
+
+			APIRequestWithToken(historyCallback, parameters.ToArray());
+		}
+
+		public void GetChannelHistory(Action<ChannelMessageHistory> callback, Channel channelInfo, DateTime? latest = null, DateTime? oldest = null, int? count = null)
+		{
+			GetHistory(callback, channelInfo.id, latest, oldest, count);
+		}
+
+		public void GetDirectMessageHistory(Action<MessageHistory> callback, DirectMessageConversation conversationInfo, DateTime? latest = null, DateTime? oldest = null, int? count = null)
+		{
+			GetHistory(callback, conversationInfo.id, latest, oldest, count);
+		}
+
+		public void GetGroupHistory(Action<GroupMessageHistory> callback, Channel groupInfo, DateTime? latest = null, DateTime? oldest = null, int? count = null)
+		{
+			GetHistory(callback, groupInfo.id, latest, oldest, count);
+		}
+
+		public void MarkChannel(Action<MarkResponse> callback, string channelId, DateTime ts)
+		{
+			APIRequestWithToken(callback,
+				new Tuple<string, string>("channel", channelId),
+				new Tuple<string, string>("ts", ts.ToProperTimeStamp())
+			);
+		}
+
+		public void GetFileInfo(Action<FileInfoResponse> callback, string fileId, int? page = null, int? count = null)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+
+			parameters.Add(new Tuple<string, string>("file", fileId));
 
-        public void GroupsCreate(Action<GroupCreateResponse> callback, string name)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("name", name));
-        }
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
 
-        public void GroupsCreateChild(Action<GroupCreateChildResponse> callback, string channelId)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
-        }
+			if (page.HasValue)
+				parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
+
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
+		#region Groups
+		public void GroupsArchive(Action<GroupArchiveResponse> callback, string channelId)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
+		}
 
-        public void GroupsInvite(Action<GroupInviteResponse> callback, string userId, string channelId)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+		public void GroupsClose(Action<GroupCloseResponse> callback, string channelId)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
+		}
 
-            parameters.Add(new Tuple<string, string>("channel", channelId));
-            parameters.Add(new Tuple<string, string>("user", userId));
+		public void GroupsCreate(Action<GroupCreateResponse> callback, string name)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("name", name));
+		}
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+		public void GroupsCreateChild(Action<GroupCreateChildResponse> callback, string channelId)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
+		}
 
-        public void GroupsKick(Action<GroupKickResponse> callback, string userId, string channelId)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+		public void GroupsInvite(Action<GroupInviteResponse> callback, string userId, string channelId)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-            parameters.Add(new Tuple<string, string>("channel", channelId));
-            parameters.Add(new Tuple<string, string>("user", userId));
+			parameters.Add(new Tuple<string, string>("channel", channelId));
+			parameters.Add(new Tuple<string, string>("user", userId));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-        public void GroupsLeave(Action<GroupLeaveResponse> callback, string channelId)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
-        }
+		public void GroupsKick(Action<GroupKickResponse> callback, string userId, string channelId)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-        public void GroupsMark(Action<GroupMarkResponse> callback, string channelId, DateTime ts)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId), new Tuple<string, string>("ts", ts.ToProperTimeStamp()));
-        }
+			parameters.Add(new Tuple<string, string>("channel", channelId));
+			parameters.Add(new Tuple<string, string>("user", userId));
 
-        public void GroupsOpen(Action<GroupOpenResponse> callback, string channelId)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
-        }
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-        public void GroupsRename(Action<GroupRenameResponse> callback, string channelId, string name)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+		public void GroupsLeave(Action<GroupLeaveResponse> callback, string channelId)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
+		}
 
-            parameters.Add(new Tuple<string, string>("channel", channelId));
-            parameters.Add(new Tuple<string, string>("name", name));
+		public void GroupsMark(Action<GroupMarkResponse> callback, string channelId, DateTime ts)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId), new Tuple<string, string>("ts", ts.ToProperTimeStamp()));
+		}
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+		public void GroupsOpen(Action<GroupOpenResponse> callback, string channelId)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
+		}
 
-        public void GroupsSetPurpose(Action<GroupSetPurposeResponse> callback, string channelId, string purpose)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+		public void GroupsRename(Action<GroupRenameResponse> callback, string channelId, string name)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-            parameters.Add(new Tuple<string, string>("channel", channelId));
-            parameters.Add(new Tuple<string, string>("purpose", purpose));
+			parameters.Add(new Tuple<string, string>("channel", channelId));
+			parameters.Add(new Tuple<string, string>("name", name));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-        public void GroupsSetTopic(Action<GroupSetPurposeResponse> callback, string channelId, string topic)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+		public void GroupsSetPurpose(Action<GroupSetPurposeResponse> callback, string channelId, string purpose)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-            parameters.Add(new Tuple<string, string>("channel", channelId));
-            parameters.Add(new Tuple<string, string>("topic", topic));
+			parameters.Add(new Tuple<string, string>("channel", channelId));
+			parameters.Add(new Tuple<string, string>("purpose", purpose));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-        public void GroupsUnarchive(Action<GroupUnarchiveResponse> callback, string channelId)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
-        }
+		public void GroupsSetTopic(Action<GroupSetPurposeResponse> callback, string channelId, string topic)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-        #endregion
+			parameters.Add(new Tuple<string, string>("channel", channelId));
+			parameters.Add(new Tuple<string, string>("topic", topic));
 
-        public void SearchAll(Action<SearchResponseAll> callback, string query, SearchSort? sorting = null, SearchSortDirection? direction = null, bool enableHighlights = false, int? count = null, int? page = null)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
-            parameters.Add(new Tuple<string, string>("query", query));
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-            if (sorting.HasValue)
-                parameters.Add(new Tuple<string, string>("sort", sorting.Value.ToString()));
+		public void GroupsUnarchive(Action<GroupUnarchiveResponse> callback, string channelId)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("channel", channelId));
+		}
 
-            if (direction.HasValue)
-                parameters.Add(new Tuple<string, string>("sort_dir", direction.Value.ToString()));
+		#endregion
 
-            if (enableHighlights)
-                parameters.Add(new Tuple<string, string>("highlight", "1"));
+		public void SearchAll(Action<SearchResponseAll> callback, string query, SearchSort? sorting = null, SearchSortDirection? direction = null, bool enableHighlights = false, int? count = null, int? page = null)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+			parameters.Add(new Tuple<string, string>("query", query));
 
-            if (count.HasValue)
-                parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
+			if (sorting.HasValue)
+				parameters.Add(new Tuple<string, string>("sort", sorting.Value.ToString()));
 
-            if (page.HasValue)
-                parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
+			if (direction.HasValue)
+				parameters.Add(new Tuple<string, string>("sort_dir", direction.Value.ToString()));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			if (enableHighlights)
+				parameters.Add(new Tuple<string, string>("highlight", "1"));
 
-        public void SearchMessages(Action<SearchResponseMessages> callback, string query, SearchSort? sorting = null, SearchSortDirection? direction = null, bool enableHighlights = false, int? count = null, int? page = null)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
-            parameters.Add(new Tuple<string, string>("query", query));
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
 
-            if (sorting.HasValue)
-                parameters.Add(new Tuple<string, string>("sort", sorting.Value.ToString()));
+			if (page.HasValue)
+				parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
 
-            if (direction.HasValue)
-                parameters.Add(new Tuple<string, string>("sort_dir", direction.Value.ToString()));
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-            if (enableHighlights)
-                parameters.Add(new Tuple<string, string>("highlight", "1"));
+		public void SearchMessages(Action<SearchResponseMessages> callback, string query, SearchSort? sorting = null, SearchSortDirection? direction = null, bool enableHighlights = false, int? count = null, int? page = null)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+			parameters.Add(new Tuple<string, string>("query", query));
 
-            if (count.HasValue)
-                parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
+			if (sorting.HasValue)
+				parameters.Add(new Tuple<string, string>("sort", sorting.Value.ToString()));
 
-            if (page.HasValue)
-                parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
+			if (direction.HasValue)
+				parameters.Add(new Tuple<string, string>("sort_dir", direction.Value.ToString()));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			if (enableHighlights)
+				parameters.Add(new Tuple<string, string>("highlight", "1"));
 
-        public void SearchFiles(Action<SearchResponseFiles> callback, string query, SearchSort? sorting = null, SearchSortDirection? direction = null, bool enableHighlights = false, int? count = null, int? page = null)
-        {
-            List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
-            parameters.Add(new Tuple<string, string>("query", query));
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
 
-            if (sorting.HasValue)
-                parameters.Add(new Tuple<string, string>("sort", sorting.Value.ToString()));
+			if (page.HasValue)
+				parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
 
-            if (direction.HasValue)
-                parameters.Add(new Tuple<string, string>("sort_dir", direction.Value.ToString()));
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-            if (enableHighlights)
-                parameters.Add(new Tuple<string, string>("highlight", "1"));
+		public void SearchFiles(Action<SearchResponseFiles> callback, string query, SearchSort? sorting = null, SearchSortDirection? direction = null, bool enableHighlights = false, int? count = null, int? page = null)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
+			parameters.Add(new Tuple<string, string>("query", query));
 
-            if (count.HasValue)
-                parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
+			if (sorting.HasValue)
+				parameters.Add(new Tuple<string, string>("sort", sorting.Value.ToString()));
 
-            if (page.HasValue)
-                parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
+			if (direction.HasValue)
+				parameters.Add(new Tuple<string, string>("sort_dir", direction.Value.ToString()));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			if (enableHighlights)
+				parameters.Add(new Tuple<string, string>("highlight", "1"));
 
-        public void GetStars(Action<StarListResponse> callback, string userId = null, int? count = null, int? page = null){
-            List<Tuple<string,string>> parameters = new List<Tuple<string,string>>();
-            
-            if(!string.IsNullOrEmpty(userId))
-                parameters.Add(new Tuple<string,string>("user", userId));
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
 
-            if(count.HasValue)
-                parameters.Add(new Tuple<string,string>("count", count.Value.ToString()));
+			if (page.HasValue)
+				parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
 
-            if(page.HasValue)
-                parameters.Add(new Tuple<string,string>("page", page.Value.ToString()));
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+		public void GetStars(Action<StarListResponse> callback, string userId = null, int? count = null, int? page = null)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-        public void PostMessage(
-            Action<PostMessageResponse> callback,
-            string channelId,
-            string text,
-            string botName = null,
-            string parse = null,
-            bool linkNames = false,
-            Attachment[] attachments = null,
-            bool unfurl_links = false,
-            string icon_url = null,
-            string icon_emoji = null)
-        {
-            List<Tuple<string,string>> parameters = new List<Tuple<string,string>>();
+			if (!string.IsNullOrEmpty(userId))
+				parameters.Add(new Tuple<string, string>("user", userId));
 
-            parameters.Add(new Tuple<string,string>("channel", channelId));
-            parameters.Add(new Tuple<string,string>("text", text));
+			if (count.HasValue)
+				parameters.Add(new Tuple<string, string>("count", count.Value.ToString()));
 
-            if(!string.IsNullOrEmpty(botName))
-                parameters.Add(new Tuple<string,string>("username", botName));
+			if (page.HasValue)
+				parameters.Add(new Tuple<string, string>("page", page.Value.ToString()));
 
-            if (!string.IsNullOrEmpty(parse))
-                parameters.Add(new Tuple<string, string>("parse", parse));
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-            if (linkNames)
-                parameters.Add(new Tuple<string, string>("link_names", "1"));
+		public void PostMessage(
+			Action<PostMessageResponse> callback,
+			string channelId,
+			string text,
+			string botName = null,
+			string parse = null,
+			bool linkNames = false,
+			Attachment[] attachments = null,
+			bool unfurl_links = false,
+			string icon_url = null,
+			string icon_emoji = null)
+		{
+			List<Tuple<string, string>> parameters = new List<Tuple<string, string>>();
 
-            if (attachments != null && attachments.Length > 0)
-                parameters.Add(new Tuple<string, string>("attachments", JsonConvert.SerializeObject(attachments)));
+			parameters.Add(new Tuple<string, string>("channel", channelId));
+			parameters.Add(new Tuple<string, string>("text", text));
 
-            if (unfurl_links)
-                parameters.Add(new Tuple<string, string>("unfurl_links", "1"));
+			if (!string.IsNullOrEmpty(botName))
+				parameters.Add(new Tuple<string, string>("username", botName));
 
-            if (!string.IsNullOrEmpty(icon_url))
-                parameters.Add(new Tuple<string, string>("icon_url", icon_url));
+			if (!string.IsNullOrEmpty(parse))
+				parameters.Add(new Tuple<string, string>("parse", parse));
 
-            if (!string.IsNullOrEmpty(icon_emoji))
-                parameters.Add(new Tuple<string, string>("icon_emoji", icon_emoji));
+			if (linkNames)
+				parameters.Add(new Tuple<string, string>("link_names", "1"));
 
-            APIRequestWithToken(callback, parameters.ToArray());
-        }
+			if (attachments != null && attachments.Length > 0)
+				parameters.Add(new Tuple<string, string>("attachments", JsonConvert.SerializeObject(attachments)));
 
-        public void UploadFile(Action<FileUploadResponse> callback, byte[] fileData, string fileName, string[] channelIds, string title = null, string initialComment = null, bool useAsync = false, string fileType = null)
-        {
-            Uri target = new Uri(Path.Combine(APIBaseLocation, useAsync ? "files.uploadAsync" : "files.upload"));
+			if (unfurl_links)
+				parameters.Add(new Tuple<string, string>("unfurl_links", "1"));
 
-            List<string> parameters = new List<string>();
-            parameters.Add(string.Format("token={0}", APIToken));
+			if (!string.IsNullOrEmpty(icon_url))
+				parameters.Add(new Tuple<string, string>("icon_url", icon_url));
 
-            //File/Content
-            if (!string.IsNullOrEmpty(fileType))
-                parameters.Add(string.Format("{0}={1}", "filetype", fileType));
+			if (!string.IsNullOrEmpty(icon_emoji))
+				parameters.Add(new Tuple<string, string>("icon_emoji", icon_emoji));
 
-            if (!string.IsNullOrEmpty(fileName))
-                parameters.Add(string.Format("{0}={1}", "filename", fileName));
+			APIRequestWithToken(callback, parameters.ToArray());
+		}
 
-            if (!string.IsNullOrEmpty(title))
-                parameters.Add(string.Format("{0}={1}", "title", title));
+		public void UploadFile(Action<FileUploadResponse> callback, byte[] fileData, string fileName, string[] channelIds, string title = null, string initialComment = null, bool useAsync = false, string fileType = null)
+		{
+			Uri target = new Uri(Path.Combine(APIBaseLocation, useAsync ? "files.uploadAsync" : "files.upload"));
 
-            if (!string.IsNullOrEmpty(initialComment))
-                parameters.Add(string.Format("{0}={1}", "initial_comment", initialComment));
+			List<string> parameters = new List<string>();
+			parameters.Add(string.Format("token={0}", APIToken));
 
-            parameters.Add(string.Format("{0}={1}", "channels", string.Join(",", channelIds)));
+			//File/Content
+			if (!string.IsNullOrEmpty(fileType))
+				parameters.Add(string.Format("{0}={1}", "filetype", fileType));
 
-            using(HttpClient client = new HttpClient())
-            using (MultipartFormDataContent form = new MultipartFormDataContent())
-            {
-                form.Add(new ByteArrayContent(fileData), "file", fileName);
-                HttpResponseMessage response = client.PostAsync(string.Format("{0}?{1}", target, string.Join("&", parameters.ToArray())), form).Result;
-                string result = response.Content.ReadAsStringAsync().Result;
-                callback(JsonConvert.DeserializeObject<FileUploadResponse>(result, new JavascriptDateTimeConverter()));
-            }
-        }
+			if (!string.IsNullOrEmpty(fileName))
+				parameters.Add(string.Format("{0}={1}", "filename", fileName));
 
-        public void EmitPresence(Action<PresenceResponse> callback, Presence status)
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("presence", status.ToString()));
-        }
+			if (!string.IsNullOrEmpty(title))
+				parameters.Add(string.Format("{0}={1}", "title", title));
 
-        public void GetPreferences(Action<UserPreferencesResponse> callback)
-        {
-            APIRequestWithToken(callback);
-        }
+			if (!string.IsNullOrEmpty(initialComment))
+				parameters.Add(string.Format("{0}={1}", "initial_comment", initialComment));
 
-        public void GetCounts(Action<UserCountsResponse> callback)
-        {
-            APIRequestWithToken(callback);
-        }
+			parameters.Add(string.Format("{0}={1}", "channels", string.Join(",", channelIds)));
 
-        public void EmitLogin(Action<LoginResponse> callback, string agent = "Inumedia<3")
-        {
-            APIRequestWithToken(callback, new Tuple<string, string>("agent", agent));
-        }
-    }
+			using (HttpClient client = new HttpClient())
+			using (MultipartFormDataContent form = new MultipartFormDataContent())
+			{
+				form.Add(new ByteArrayContent(fileData), "file", fileName);
+				HttpResponseMessage response = client.PostAsync(string.Format("{0}?{1}", target, string.Join("&", parameters.ToArray())), form).Result;
+				string result = response.Content.ReadAsStringAsync().Result;
+				callback(JsonConvert.DeserializeObject<FileUploadResponse>(result, new JavascriptDateTimeConverter()));
+			}
+		}
+
+		public void EmitPresence(Action<PresenceResponse> callback, Presence status)
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("presence", status.ToString()));
+		}
+
+		public void GetPreferences(Action<UserPreferencesResponse> callback)
+		{
+			APIRequestWithToken(callback);
+		}
+
+		public void GetCounts(Action<UserCountsResponse> callback)
+		{
+			APIRequestWithToken(callback);
+		}
+
+		public void EmitLogin(Action<LoginResponse> callback, string agent = "Inumedia<3")
+		{
+			APIRequestWithToken(callback, new Tuple<string, string>("agent", agent));
+		}
+	}
 }

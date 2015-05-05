@@ -31,8 +31,14 @@ namespace SlackAPI
             if (Post.Length == 0)
             {
                 request.Method = "GET";
-                request.BeginGetResponse(GotResponse, this);
-            }
+#if !DEBUG
+				HttpWebResponse wr = (HttpWebResponse)request.GetResponse();
+				K result = ProcessWebResponse(wr);
+				callback(result);
+#else 
+				request.BeginGetResponse(GotResponse, this);
+#endif
+			}
             else
             {
                 request.Method = "POST";
@@ -78,17 +84,23 @@ namespace SlackAPI
                 //TODO: Handle timeouts, etc?
             }
 
-            K responseObj;
-
-            using(Stream responseReading = response.GetResponseStream())
-            using (StreamReader reader = new StreamReader(responseReading))
-            {
-                string responseData = reader.ReadToEnd();
-                responseObj = JsonConvert.DeserializeObject<K>(responseData, new JavascriptDateTimeConverter());
-            }
+			K responseObj = ProcessWebResponse(response);
 
             callback(responseObj);
         }
+
+		private K ProcessWebResponse(HttpWebResponse _response)
+		{
+			K responseObj;
+
+			using (Stream responseReading = _response.GetResponseStream())
+			using (StreamReader reader = new StreamReader(responseReading))
+			{
+				string responseData = reader.ReadToEnd();
+				responseObj = JsonConvert.DeserializeObject<K>(responseData, new JavascriptDateTimeConverter());
+			}
+			return responseObj;
+		}
     }
 
     [AttributeUsage(AttributeTargets.Class, Inherited=false)]

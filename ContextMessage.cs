@@ -8,16 +8,9 @@ namespace SlackAPI
 {
     public class ContextMessage : Message
     {
-        public string type;
         /// <summary>
         /// Only contains partial channel data.
         /// </summary>
-        public Channel channel;
-        public string user;
-        public string username;
-        public DateTime ts;
-        public string text;
-        public string permalink;
         public Message previous_2;
         public Message previous;
         public Message next;

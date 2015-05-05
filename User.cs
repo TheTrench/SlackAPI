@@ -6,9 +6,9 @@ using System.Threading.Tasks;
 
 namespace SlackAPI
 {
-    public class User
+    public class User : IMessageSource
     {
-        public string id;
+		public string id { get; set; }
         public bool IsSlackBot
         {
             get
@@ -16,7 +16,8 @@ namespace SlackAPI
                 return id.Equals("USLACKBOT", StringComparison.CurrentCultureIgnoreCase);
             }
         }
-        public string name;
+		public string name { get; set; }
+		public string display { get { return name; } }
         public bool deleted;
         public string color;
         public UserProfile profile;

@@ -8,7 +8,7 @@ namespace SlackAPI
 {
     public class DirectMessageConversation
     {
-        public string id;
+		public string id;
         public string user;
         public DateTime created;
         public bool is_user_deleted;

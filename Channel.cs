@@ -6,11 +6,12 @@ using System.Threading.Tasks;
 
 namespace SlackAPI
 {
-    public class Channel
-    {
-        public string id;
+    public class Channel : IMessageSource
+	{
+		public string id { get; set; }
 
-        public string name;
+		public string name { get; set; }
+		public string display { get { return is_channel ? "#" + name : name; } }
         public string creator;
         public DateTime created;
         public DateTime last_read;
